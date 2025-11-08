@@ -1,136 +1,168 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Orçamento {{ $orcamento->id }}</title>
-    <style>
-        /* Basic styling for the PDF */
-        body {
-            font-family: sans-serif; /* Use a common font */
-            font-size: 12px;
-            line-height: 1.4;
-            margin: 20px;
-            color: #333;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-            border-bottom: 1px solid #ccc;
-            padding-bottom: 10px;
-        }
-        .header h1 {
-            margin: 0;
-            font-size: 24px;
-        }
-        .header p {
-            margin: 5px 0 0;
-            font-size: 14px;
-            color: #666;
-        }
-        .client-info {
-            margin-bottom: 20px;
-            padding: 10px;
-            border: 1px solid #eee;
-            background-color: #f9f9f9;
-            border-radius: 5px;
-        }
-        .client-info h2 {
-            margin-top: 0;
-            margin-bottom: 10px;
-            font-size: 16px;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 5px;
-        }
-        .client-info p {
-            margin: 5px 0;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 20px;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        th {
-            background-color: #f2f2f2;
-            font-weight: bold;
-        }
-        .total-section {
-            text-align: right;
-            margin-top: 20px;
-            padding-top: 10px;
-            border-top: 1px solid #ccc;
-        }
-        .total-section h3 {
-            margin: 0;
-            font-size: 18px;
-        }
-        .text-right {
-            text-align: right;
-        }
-        .text-center {
-            text-align: center;
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Orçamento #{{ $orcamento->id }}</h1>
-        <p>Data: {{ $orcamento->data->format("d/m/Y") }}</p>
-        {{-- Add Marmoraria Name/Logo here if desired --}}
-        {{-- <p>Nome da Marmoraria</p> --}}
-    </div>
+    <head>
+        <meta charset="UTF-8">
+        <title>Orçamento {{ $orcamento->numero }}</title>
+        <style>
+            * { font-family: "DejaVu Sans", sans-serif; }
+            body { font-size: 12px; color: #111827; }
+            h1, h2, h3, h4 { margin: 0; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #111827; padding-bottom: 8px; margin-bottom: 16px; }
+            .info-block { margin-bottom: 16px; }
+            .info-block h3 { font-size: 14px; margin-bottom: 6px; text-transform: uppercase; color: #1f2937; }
+            .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+            table thead { background-color: #e5e7eb; }
+            table th, table td { border: 1px solid #9ca3af; padding: 6px; text-align: left; }
+            .totals { display: flex; justify-content: flex-end; margin-top: 12px; }
+            .totals table { width: auto; }
+            .muted { color: #6b7280; }
+            .badge { display: inline-block; padding: 2px 6px; border-radius: 12px; font-size: 10px; text-transform: uppercase; }
+            .badge-r { background-color: #fee2e2; color: #b91c1c; }
+            .badge-g { background-color: #dcfce7; color: #166534; }
+            .badge-b { background-color: #dbeafe; color: #1d4ed8; }
+            .badge-n { background-color: #e5e7eb; color: #374151; }
+            .section { margin-bottom: 24px; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div>
+                <h1>Orçamento {{ $orcamento->numero }}</h1>
+                <p class="muted">Emitido em {{ $orcamento->data->format('d/m/Y') }}</p>
+            </div>
+            <div>
+                @php
+                    $badgeClass = match($orcamento->status) {
+                        'aprovado' => 'badge badge-g',
+                        'enviado' => 'badge badge-b',
+                        'reprovado', 'cancelado' => 'badge badge-r',
+                        default => 'badge badge-n'
+                    };
+                @endphp
+                <span class="{{ $badgeClass }}">{{ strtoupper($orcamento->status) }}</span>
+            </div>
+        </div>
 
-    <div class="client-info">
-        <h2>Dados do Cliente</h2>
-        <p><strong>Nome:</strong> {{ $orcamento->cliente->nome }}</p>
-        <p><strong>Email:</strong> {{ $orcamento->cliente->email ?? "-" }}</p>
-        <p><strong>Telefone:</strong> {{ $orcamento->cliente->telefone ?? "-" }}</p>
-        <p><strong>Endereço:</strong> {{ $orcamento->cliente->endereco ?? "-" }}</p>
-    </div>
+        <div class="section">
+            <div class="info-block">
+                <h3>Cliente</h3>
+                <p><strong>{{ $orcamento->cliente->nome }}</strong></p>
+                <p class="muted">
+                    {{ $orcamento->cliente->email ?? 'Sem e-mail' }} • {{ $orcamento->cliente->telefone ?? 'Sem telefone' }}
+                </p>
+            </div>
 
-    <h2>Itens do Orçamento</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Item</th>
-                <th>Material</th>
-                <th>Serviço</th>
-                <th class="text-center">Qtde (m²)</th>
-                <th class="text-right">Subtotal</th>
-            </tr>
-        </thead>
-        <tbody>
-            @php $totalGeral = 0; @endphp
-            @forelse ($orcamento->items as $index => $item)
-                @php $totalGeral += $item->subtotal; @endphp
-                <tr>
-                    <td>{{ $index + 1 }}</td>
-                    <td>{{ $item->material->nome ?? "N/A" }}</td>
-                    <td>{{ $item->servico->descricao ?? "N/A" }}</td>
-                    <td class="text-center">{{ number_format($item->quantidade_m2, 2, ",", ".") }}</td>
-                    <td class="text-right">R$ {{ number_format($item->subtotal, 2, ",", ".") }}</td>
-                </tr>
-                @if($item->descricao)
-                <tr>
-                    <td colspan="5"><em>Obs: {{ $item->descricao }}</em></td>
-                </tr>
+            <div class="grid">
+                <div class="info-block">
+                    <h3>Pagamento</h3>
+                    <p>{{ $orcamento->paymentMethod?->nome ?? 'Não definido' }}</p>
+                    @if ($orcamento->condicoes_pagamento)
+                        <p class="muted">{{ $orcamento->condicoes_pagamento }}</p>
+                    @endif
+                </div>
+                <div class="info-block">
+                    <h3>Validade</h3>
+                    <p>
+                        Válido até
+                        {{ $orcamento->data_validade ? $orcamento->data_validade->format('d/m/Y') : 'sem data definida' }}
+                    </p>
+                    @if ($orcamento->responsavel)
+                        <p class="muted">Responsável: {{ $orcamento->responsavel }}</p>
+                    @endif
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>Totais</h3>
+            <table>
+                <tbody>
+                    <tr>
+                        <th>Subtotal materiais</th>
+                        <td>R$ {{ number_format($orcamento->total_material, 2, ',', '.') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Subtotal serviços</th>
+                        <td>R$ {{ number_format($orcamento->total_servico, 2, ',', '.') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Descontos</th>
+                        <td>- R$ {{ number_format($orcamento->total_desconto, 2, ',', '.') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Acréscimos</th>
+                        <td>+ R$ {{ number_format($orcamento->total_acrescimo, 2, ',', '.') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Total líquido</th>
+                        <td><strong>R$ {{ number_format($orcamento->total_liquido, 2, ',', '.') }}</strong></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        @foreach ($orcamento->locais as $local)
+            <div class="section">
+                <h3>{{ $local->nome }}</h3>
+                @if ($local->observacoes)
+                    <p class="muted">{{ $local->observacoes }}</p>
                 @endif
-            @empty
-                <tr>
-                    <td colspan="5" class="text-center">Nenhum item adicionado a este orçamento.</td>
-                </tr>
-            @endforelse
-        </tbody>
-    </table>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Peça</th>
+                            <th>Material</th>
+                            <th>Dimensões</th>
+                            <th>Qtd</th>
+                            <th>Área (m²)</th>
+                            <th>Subtotal</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach ($local->pecas as $peca)
+                            <tr>
+                                <td>
+                                    {{ $peca->identificador ?? 'Peça #' . $peca->id }}
+                                    @if ($peca->observacoes)
+                                        <div class="muted">{{ $peca->observacoes }}</div>
+                                    @endif
+                                </td>
+                                <td>{{ $peca->material->nome }}</td>
+                                <td>
+                                    {{ number_format($peca->largura_mm / 10, 1, ',', '.') }} x {{ number_format($peca->comprimento_mm / 10, 1, ',', '.') }} cm
+                                </td>
+                                <td>{{ $peca->quantidade }}</td>
+                                <td>{{ number_format($peca->area_m2, 3, ',', '.') }}</td>
+                                <td>R$ {{ number_format($peca->total, 2, ',', '.') }}</td>
+                            </tr>
+                            @if ($peca->servicos->isNotEmpty())
+                                <tr>
+                                    <td colspan="6">
+                                        <strong>Serviços:</strong>
+                                        <ul>
+                                            @foreach ($peca->servicos as $itemServico)
+                                                <li>
+                                                    {{ $itemServico->descricao }} •
+                                                    {{ number_format($itemServico->quantidade, 3, ',', '.') }} {{ $itemServico->tipo_cobranca }}
+                                                    — R$ {{ number_format($itemServico->total, 2, ',', '.') }}
+                                                </li>
+                                            @endforeach
+                                        </ul>
+                                    </td>
+                                </tr>
+                            @endif
+                        @endforeach
+                    </tbody>
+                </table>
+            </div>
+        @endforeach
 
-    <div class="total-section">
-        <h3>Total Geral: R$ {{ number_format($totalGeral, 2, ",", ".") }}</h3>
-    </div>
-
-</body>
+        @if ($orcamento->observacoes)
+            <div class="section">
+                <h3>Observações finais</h3>
+                <p>{{ $orcamento->observacoes }}</p>
+            </div>
+        @endif
+    </body>
 </html>

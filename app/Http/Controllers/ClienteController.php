@@ -10,10 +10,21 @@ class ClienteController extends Controller
     /**
      * Display a listing of the resource.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $clientes = Cliente::orderBy("nome")->get();
-        return view("clientes.index", compact("clientes"));
+        $busca = $request->string('q')->trim();
+
+        $clientes = Cliente::query()
+            ->when($busca, function ($query, $busca) {
+                $query->where('nome', 'like', "%{$busca}%")
+                    ->orWhere('documento', 'like', "%{$busca}%")
+                    ->orWhere('email', 'like', "%{$busca}%");
+            })
+            ->orderBy('nome')
+            ->paginate(15)
+            ->withQueryString();
+
+        return view('clientes.index', compact('clientes', 'busca'));
     }
 
     /**
@@ -29,15 +40,28 @@ class ClienteController extends Controller
      */
     public function store(Request $request)
     {
-        $request->validate([
-            "nome" => "required|string|max:255",
-            "email" => "nullable|email|max:255|unique:clientes,email",
-            "telefone" => "nullable|string|max:20",
+        $dados = $request->validate([
+            'nome' => 'required|string|max:255',
+            'tipo_cliente' => 'required|in:pf,pj',
+            'documento' => 'nullable|string|max:20|unique:clientes,documento',
+            'email' => 'nullable|email|max:255|unique:clientes,email',
+            'telefone' => 'nullable|string|max:20',
+            'telefone_secundario' => 'nullable|string|max:20',
+            'endereco' => 'nullable|string|max:255',
+            'numero' => 'nullable|string|max:20',
+            'complemento' => 'nullable|string|max:255',
+            'bairro' => 'nullable|string|max:120',
+            'cidade' => 'nullable|string|max:120',
+            'estado' => 'nullable|string|size:2',
+            'cep' => 'nullable|string|max:9',
+            'observacoes' => 'nullable|string',
         ]);
 
-        $cliente = Cliente::create($request->all());
+        $cliente = Cliente::create($dados);
 
-        return redirect()->route("clientes.index")->with("success", "Cliente ".$cliente->nome." criado com sucesso.");
+        return redirect()
+            ->route('clientes.index')
+            ->with('success', "Cliente {$cliente->nome} criado com sucesso.");
     }
 
     /**
@@ -62,16 +86,28 @@ class ClienteController extends Controller
      */
     public function update(Request $request, Cliente $cliente)
     {
-        $request->validate([
-            "nome" => "required|string|max:255",
-            // Validação unique ignorando o próprio cliente
-            "email" => "nullable|email|max:255|unique:clientes,email," . $cliente->id,
-            "telefone" => "nullable|string|max:20",
+        $dados = $request->validate([
+            'nome' => 'required|string|max:255',
+            'tipo_cliente' => 'required|in:pf,pj',
+            'documento' => 'nullable|string|max:20|unique:clientes,documento,' . $cliente->id,
+            'email' => 'nullable|email|max:255|unique:clientes,email,' . $cliente->id,
+            'telefone' => 'nullable|string|max:20',
+            'telefone_secundario' => 'nullable|string|max:20',
+            'endereco' => 'nullable|string|max:255',
+            'numero' => 'nullable|string|max:20',
+            'complemento' => 'nullable|string|max:255',
+            'bairro' => 'nullable|string|max:120',
+            'cidade' => 'nullable|string|max:120',
+            'estado' => 'nullable|string|size:2',
+            'cep' => 'nullable|string|max:9',
+            'observacoes' => 'nullable|string',
         ]);
 
-        $cliente->update($request->all());
+        $cliente->update($dados);
 
-        return redirect()->route("clientes.index")->with("success", "Cliente ".$cliente->nome." atualizado com sucesso.");
+        return redirect()
+            ->route('clientes.index')
+            ->with('success', "Cliente {$cliente->nome} atualizado com sucesso.");
     }
 
     /**
@@ -85,7 +121,10 @@ class ClienteController extends Controller
             // Se a constraint fosse RESTRICT, precisaria tratar a exceção.
             $nomeCliente = $cliente->nome;
             $cliente->delete();
-            return redirect()->route("clientes.index")->with("success", "Cliente ".$nomeCliente." removido com sucesso.");
+
+            return redirect()
+                ->route('clientes.index')
+                ->with('success', "Cliente {$nomeCliente} removido com sucesso.");
         } catch (\Illuminate\Database\QueryException $e) {
             // Se houver uma restrição de chave estrangeira (caso onDelete não seja cascade)
             // Pode adicionar uma mensagem de erro mais específica

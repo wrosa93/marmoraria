@@ -10,10 +10,24 @@ class MaterialController extends Controller
     /**
      * Display a listing of the resource.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $materiais = Material::orderBy("nome")->get();
-        return view("materiais.index", compact("materiais"));
+        $busca = $request->string('q')->trim();
+
+        $materiais = Material::query()
+            ->with(['prices' => function ($query) {
+                $query->orderByDesc('data_inicio');
+            }])
+            ->when($busca, function ($query, $busca) {
+                $query->where('nome', 'like', "%{$busca}%")
+                    ->orWhere('codigo', 'like', "%{$busca}%")
+                    ->orWhere('tipo', 'like', "%{$busca}%");
+            })
+            ->orderBy('nome')
+            ->paginate(15)
+            ->withQueryString();
+
+        return view('materiais.index', compact('materiais', 'busca'));
     }
 
     /**
@@ -29,16 +43,42 @@ class MaterialController extends Controller
      */
     public function store(Request $request)
     {
-        $request->validate([
-            "nome" => "required|string|max:255|unique:materials,nome",
-            "tipo" => "required|string|max:255",
-            "preco_m2" => "required|numeric|min:0",
-            "espessura_mm" => "required|numeric|min:0",
+        $dados = $request->validate([
+            'codigo' => 'required|string|max:30|unique:materials,codigo',
+            'nome' => 'required|string|max:120',
+            'tipo' => 'nullable|string|max:120',
+            'acabamento' => 'nullable|string|max:120',
+            'cor' => 'nullable|string|max:120',
+            'espessura_padrao_mm' => 'nullable|numeric|min:0',
+            'ativo' => 'nullable|boolean',
+            'descricao' => 'nullable|string',
+            'preco_m2' => 'required|numeric|min:0',
+            'data_inicio_preco' => 'required|date',
+            'observacao_preco' => 'nullable|string|max:255',
         ]);
 
-        $material = Material::create($request->all());
+        $material = Material::create([
+            'codigo' => $dados['codigo'],
+            'nome' => $dados['nome'],
+            'tipo' => $dados['tipo'] ?? null,
+            'acabamento' => $dados['acabamento'] ?? null,
+            'cor' => $dados['cor'] ?? null,
+            'espessura_padrao_mm' => $dados['espessura_padrao_mm'] ?? null,
+            'ativo' => $dados['ativo'] ?? true,
+            'descricao' => $dados['descricao'] ?? null,
+        ]);
 
-        return redirect()->route("materiais.index")->with("success", "Material ".$material->nome." criado com sucesso.");
+        $material->prices()->create([
+            'data_inicio' => $dados['data_inicio_preco'],
+            'preco_m2' => $dados['preco_m2'],
+            'observacao' => $dados['observacao_preco'] ?? null,
+            'moeda' => 'BRL',
+            'ativo' => true,
+        ]);
+
+        return redirect()
+            ->route('materiais.show', $material)
+            ->with('success', 'Material criado com sucesso com tabela de preço vigente.');
     }
 
     /**
@@ -46,7 +86,11 @@ class MaterialController extends Controller
      */
     public function show(Material $material)
     {
-        return view("materiais.show", compact("material"));
+        $material->load(['prices' => function ($query) {
+            $query->orderByDesc('data_inicio');
+        }]);
+
+        return view('materiais.show', compact('material'));
     }
 
     /**
@@ -54,7 +98,11 @@ class MaterialController extends Controller
      */
     public function edit(Material $material)
     {
-        return view("materiais.edit", compact("material"));
+        $material->load(['prices' => function ($query) {
+            $query->orderByDesc('data_inicio');
+        }]);
+
+        return view('materiais.edit', compact('material'));
     }
 
     /**
@@ -62,16 +110,54 @@ class MaterialController extends Controller
      */
     public function update(Request $request, Material $material)
     {
-        $request->validate([
-            "nome" => "required|string|max:255|unique:materials,nome," . $material->id,
-            "tipo" => "required|string|max:255",
-            "preco_m2" => "required|numeric|min:0",
-            "espessura_mm" => "required|numeric|min:0",
+        $dados = $request->validate([
+            'codigo' => 'required|string|max:30|unique:materials,codigo,' . $material->id,
+            'nome' => 'required|string|max:120',
+            'tipo' => 'nullable|string|max:120',
+            'acabamento' => 'nullable|string|max:120',
+            'cor' => 'nullable|string|max:120',
+            'espessura_padrao_mm' => 'nullable|numeric|min:0',
+            'ativo' => 'nullable|boolean',
+            'descricao' => 'nullable|string',
+            'preco_m2' => 'nullable|numeric|min:0|required_with:data_inicio_preco',
+            'data_inicio_preco' => 'nullable|date|required_with:preco_m2',
+            'observacao_preco' => 'nullable|string|max:255',
         ]);
 
-        $material->update($request->all());
+        $material->update([
+            'codigo' => $dados['codigo'],
+            'nome' => $dados['nome'],
+            'tipo' => $dados['tipo'] ?? null,
+            'acabamento' => $dados['acabamento'] ?? null,
+            'cor' => $dados['cor'] ?? null,
+            'espessura_padrao_mm' => $dados['espessura_padrao_mm'] ?? null,
+            'ativo' => $dados['ativo'] ?? false,
+            'descricao' => $dados['descricao'] ?? null,
+        ]);
 
-        return redirect()->route("materiais.index")->with("success", "Material ".$material->nome." atualizado com sucesso.");
+        if (! empty($dados['preco_m2']) && ! empty($dados['data_inicio_preco'])) {
+            $existePreco = $material->prices()
+                ->whereDate('data_inicio', $dados['data_inicio_preco'])
+                ->exists();
+
+            if ($existePreco) {
+                return back()
+                    ->withInput()
+                    ->withErrors(['data_inicio_preco' => 'Já existe um preço cadastrado para esta data de início.']);
+            }
+
+            $material->prices()->create([
+                'data_inicio' => $dados['data_inicio_preco'],
+                'preco_m2' => $dados['preco_m2'],
+                'observacao' => $dados['observacao_preco'] ?? null,
+                'moeda' => 'BRL',
+                'ativo' => true,
+            ]);
+        }
+
+        return redirect()
+            ->route('materiais.show', $material)
+            ->with('success', "Material {$material->nome} atualizado com sucesso.");
     }
 
     /**
@@ -80,17 +166,23 @@ class MaterialController extends Controller
     public function destroy(Material $material)
     {
         try {
-            // Verifica se o material está sendo usado em algum item de orçamento
-            if ($material->orcamentoItems()->exists()) {
-                return redirect()->route("materiais.index")->with("error", "Não é possível remover o material ".$material->nome." pois ele está sendo utilizado em orçamentos.");
+            if ($material->pecas()->exists()) {
+                return redirect()
+                    ->route('materiais.index')
+                    ->with('error', "Não é possível remover o material {$material->nome} pois ele está vinculado a peças de orçamento.");
             }
 
             $nomeMaterial = $material->nome;
+            $material->prices()->delete();
             $material->delete();
-            return redirect()->route("materiais.index")->with("success", "Material ".$nomeMaterial." removido com sucesso.");
+
+            return redirect()
+                ->route('materiais.index')
+                ->with('success', "Material {$nomeMaterial} removido com sucesso.");
         } catch (\Exception $e) {
-            // Log::error("Erro ao remover material: " . $e->getMessage());
-            return redirect()->route("materiais.index")->with("error", "Erro ao remover o material. Tente novamente.");
+            return redirect()
+                ->route('materiais.index')
+                ->with('error', 'Erro ao remover o material. Tente novamente.');
         }
     }
 }

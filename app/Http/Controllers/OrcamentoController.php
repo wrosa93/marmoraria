@@ -2,262 +2,461 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Orcamento;
-use App\Models\OrcamentoItem;
 use App\Models\Cliente;
 use App\Models\Material;
+use App\Models\Orcamento;
+use App\Models\OrcamentoLocal;
+use App\Models\OrcamentoPeca;
+use App\Models\OrcamentoPecaServico;
+use App\Models\PaymentMethod;
 use App\Models\Servico;
+use App\Services\OrcamentoCalculator;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB; // Import DB facade for transactions
-// If using WeasyPrint via exec, no need for direct use statement
-// use WeasyPrint\WeasyPrint;
+use Illuminate\Support\Facades\DB;
 
 class OrcamentoController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index()
+    private const STATUSES = ['rascunho', 'enviado', 'aprovado', 'reprovado', 'cancelado'];
+
+    public function __construct(private readonly OrcamentoCalculator $calculator)
     {
-        $orcamentos = Orcamento::with("cliente", "items")->latest()->paginate(15); // Paginate and order by latest
-        return view("orcamentos.index", compact("orcamentos"));
     }
 
-    /**
-     * Show the form for creating a new resource.
-     */
+    public function index(Request $request)
+    {
+        $status = $request->string('status')->trim();
+        $busca = $request->string('q')->trim();
+
+        $orcamentos = Orcamento::query()
+            ->with(['cliente', 'paymentMethod'])
+            ->when($status && in_array($status, self::STATUSES, true), function ($query) use ($status) {
+                $query->where('status', $status);
+            })
+            ->when($busca, function ($query, $busca) {
+                $query->whereHas('cliente', function ($subQuery) use ($busca) {
+                    $subQuery->where('nome', 'like', "%{$busca}%")
+                        ->orWhere('documento', 'like', "%{$busca}%");
+                })
+                ->orWhere('numero', 'like', "%{$busca}%");
+            })
+            ->orderByDesc('data')
+            ->orderByDesc('id')
+            ->paginate(15)
+            ->withQueryString();
+
+        return view('orcamentos.index', [
+            'orcamentos' => $orcamentos,
+            'statusAtual' => $status,
+            'busca' => $busca,
+            'statuses' => self::STATUSES,
+        ]);
+    }
+
     public function create()
     {
-        $clientes = Cliente::orderBy("nome")->get();
-        return view("orcamentos.create", compact("clientes"));
+        return view('orcamentos.create', [
+            'clientes' => Cliente::orderBy('nome')->get(),
+            'paymentMethods' => PaymentMethod::where('ativo', true)->orderBy('nome')->get(),
+            'statuses' => self::STATUSES,
+        ]);
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
     public function store(Request $request)
     {
-        $request->validate([
-            "cliente_id" => "required|exists:clientes,id",
-            "data" => "required|date",
+        $dados = $request->validate([
+            'cliente_id' => 'required|exists:clientes,id',
+            'data' => 'required|date',
+            'data_validade' => 'nullable|date|after_or_equal:data',
+            'payment_method_id' => 'nullable|exists:payment_methods,id',
+            'status' => 'required|in:' . implode(',', self::STATUSES),
+            'desconto_tipo' => 'required|in:nenhum,percentual,valor',
+            'desconto_percentual' => 'nullable|numeric|min:0|max:100',
+            'desconto_valor' => 'nullable|numeric|min:0',
+            'acrescimo_valor' => 'nullable|numeric|min:0',
+            'condicoes_pagamento' => 'nullable|string',
+            'observacoes' => 'nullable|string',
+            'responsavel' => 'nullable|string|max:120',
         ]);
 
-        $orcamento = Orcamento::create($request->all());
+        $this->ajustarValoresDeDesconto($dados);
 
-        // Redirect to edit page to add items
-        return redirect()->route("orcamentos.edit", $orcamento)->with("success", "Orçamento criado com sucesso. Adicione itens abaixo.");
+        $orcamento = Orcamento::create([
+            'cliente_id' => $dados['cliente_id'],
+            'payment_method_id' => $dados['payment_method_id'] ?? null,
+            'data' => $dados['data'],
+            'data_validade' => $dados['data_validade'] ?? null,
+            'status' => $dados['status'],
+            'desconto_tipo' => $dados['desconto_tipo'],
+            'desconto_percentual' => $dados['desconto_percentual'] ?? 0,
+            'desconto_valor' => $dados['desconto_valor'] ?? 0,
+            'acrescimo_valor' => $dados['acrescimo_valor'] ?? 0,
+            'condicoes_pagamento' => $dados['condicoes_pagamento'] ?? null,
+            'observacoes' => $dados['observacoes'] ?? null,
+            'responsavel' => $dados['responsavel'] ?? null,
+        ]);
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return redirect()
+            ->route('orcamentos.edit', $orcamento)
+            ->with('success', 'Orçamento criado. Agora adicione ambientes, peças e serviços.');
     }
 
-    /**
-     * Display the specified resource.
-     */
     public function show(Orcamento $orcamento)
     {
-        $orcamento->load("cliente", "items.material", "items.servico");
-        return view("orcamentos.show", compact("orcamento"));
+        $orcamento->load([
+            'cliente',
+            'paymentMethod',
+            'locais.pecas.material',
+            'locais.pecas.servicos.servico',
+        ]);
+
+        return view('orcamentos.show', [
+            'orcamento' => $orcamento,
+            'statuses' => self::STATUSES,
+        ]);
     }
 
-    /**
-     * Show the form for editing the specified resource.
-     */
     public function edit(Orcamento $orcamento)
     {
-        $clientes = Cliente::orderBy("nome")->get();
-        $materiais = Material::orderBy("nome")->get();
-        $servicos = Servico::orderBy("descricao")->get();
-        $orcamento->load("items.material", "items.servico");
-        return view("orcamentos.edit", compact("orcamento", "clientes", "materiais", "servicos"));
+        $orcamento->load([
+            'cliente',
+            'paymentMethod',
+            'locais.pecas.material',
+            'locais.pecas.servicos.servico',
+        ]);
+
+        return view('orcamentos.edit', [
+            'orcamento' => $orcamento,
+            'clientes' => Cliente::orderBy('nome')->get(),
+            'paymentMethods' => PaymentMethod::where('ativo', true)->orderBy('nome')->get(),
+            'materiais' => Material::where('ativo', true)->orderBy('nome')->get(),
+            'servicos' => Servico::where('ativo', true)->orderBy('nome')->get(),
+            'statuses' => self::STATUSES,
+        ]);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
     public function update(Request $request, Orcamento $orcamento)
     {
-        $request->validate([
-            "cliente_id" => "required|exists:clientes,id",
-            "data" => "required|date",
+        $dados = $request->validate([
+            'cliente_id' => 'required|exists:clientes,id',
+            'data' => 'required|date',
+            'data_validade' => 'nullable|date|after_or_equal:data',
+            'payment_method_id' => 'nullable|exists:payment_methods,id',
+            'status' => 'required|in:' . implode(',', self::STATUSES),
+            'desconto_tipo' => 'required|in:nenhum,percentual,valor',
+            'desconto_percentual' => 'nullable|numeric|min:0|max:100',
+            'desconto_valor' => 'nullable|numeric|min:0',
+            'acrescimo_valor' => 'nullable|numeric|min:0',
+            'condicoes_pagamento' => 'nullable|string',
+            'observacoes' => 'nullable|string',
+            'responsavel' => 'nullable|string|max:120',
         ]);
 
-        $orcamento->update($request->only(["cliente_id", "data"])); // Only update basic info
+        $this->ajustarValoresDeDesconto($dados);
 
-        return redirect()->route("orcamentos.edit", $orcamento)->with("success", "Orçamento atualizado com sucesso.");
+        $orcamento->update([
+            'cliente_id' => $dados['cliente_id'],
+            'payment_method_id' => $dados['payment_method_id'] ?? null,
+            'data' => $dados['data'],
+            'data_validade' => $dados['data_validade'] ?? null,
+            'status' => $dados['status'],
+            'desconto_tipo' => $dados['desconto_tipo'],
+            'desconto_percentual' => $dados['desconto_percentual'] ?? 0,
+            'desconto_valor' => $dados['desconto_valor'] ?? 0,
+            'acrescimo_valor' => $dados['acrescimo_valor'] ?? 0,
+            'condicoes_pagamento' => $dados['condicoes_pagamento'] ?? null,
+            'observacoes' => $dados['observacoes'] ?? null,
+            'responsavel' => $dados['responsavel'] ?? null,
+            'data_base_precos' => $orcamento->data_base_precos ?? $dados['data'],
+        ]);
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Orçamento atualizado com sucesso.');
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
     public function destroy(Orcamento $orcamento)
     {
-        // Itens são deletados em cascata devido à constraint no banco
+        $numero = $orcamento->numero;
         $orcamento->delete();
 
-        return redirect()->route("orcamentos.index")->with("success", "Orçamento removido com sucesso.");
+        return redirect()
+            ->route('orcamentos.index')
+            ->with('success', "Orçamento {$numero} removido com sucesso.");
     }
 
-    /**
-     * Add an item to the specified budget.
-     */
-    public function addItem(Request $request, Orcamento $orcamento)
+    public function storeLocal(Request $request, Orcamento $orcamento)
     {
-        $request->validate([
-            "material_id" => "required|exists:materials,id",
-            "servico_id" => "required|exists:servicos,id",
-            "quantidade_m2" => "required|numeric|min:0.01", // Ensure quantity is positive
-            "descricao" => "nullable|string|max:255",
+        $dados = $request->validate([
+            'nome' => 'required|string|max:120',
+            'ordem' => 'nullable|integer|min:1',
+            'observacoes' => 'nullable|string',
         ]);
 
-        try {
-            DB::beginTransaction();
+        $ordem = $dados['ordem'] ?? ($orcamento->locais()->max('ordem') + 1);
 
-            $material = Material::findOrFail($request->material_id);
-            $servico = Servico::findOrFail($request->servico_id);
+        $orcamento->locais()->create([
+            'nome' => $dados['nome'],
+            'ordem' => $ordem,
+            'observacoes' => $dados['observacoes'] ?? null,
+        ]);
 
-            // Calcular subtotal
-            $subtotalMaterial = $material->preco_m2 * $request->quantidade_m2;
-            $subtotalServico = $servico->preco_unitario * $request->quantidade_m2; // Assuming service price is also per m2
-            $subtotal = $subtotalMaterial + $subtotalServico;
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
 
-            $orcamento->items()->create([
-                "material_id" => $request->material_id,
-                "servico_id" => $request->servico_id,
-                "quantidade_m2" => $request->quantidade_m2,
-                "descricao" => $request->descricao,
-                "subtotal" => $subtotal,
-            ]);
-
-            DB::commit();
-
-            return redirect()->route("orcamentos.edit", $orcamento)->with("success", "Item adicionado ao orçamento.");
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            // Log::error("Erro ao adicionar item ao orçamento: " . $e->getMessage());
-            return redirect()->route("orcamentos.edit", $orcamento)->with("error", "Erro ao adicionar item ao orçamento. Tente novamente.");
-        }
+        return back()->with('success', 'Ambiente adicionado ao orçamento.');
     }
 
-    /**
-     * Remove an item from the specified budget.
-     */
-    public function removeItem(Orcamento $orcamento, OrcamentoItem $item)
+    public function destroyLocal(Orcamento $orcamento, OrcamentoLocal $local)
     {
-        // Verifica se o item pertence ao orçamento
-        if ($item->orcamento_id !== $orcamento->id) {
-             return redirect()->route("orcamentos.edit", $orcamento)->with("error", "Item inválido ou não pertence a este orçamento.");
-        }
+        abort_unless($local->orcamento_id === $orcamento->id, 404);
 
-        try {
-            DB::beginTransaction();
-            $item->delete();
-            DB::commit();
-            return redirect()->route("orcamentos.edit", $orcamento)->with("success", "Item removido do orçamento.");
-        } catch (\Exception $e) {
-            DB::rollBack();
-            // Log::error("Erro ao remover item do orçamento: " . $e->getMessage());
-            return redirect()->route("orcamentos.edit", $orcamento)->with("error", "Erro ao remover item do orçamento. Tente novamente.");
-        }
+        $local->delete();
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Ambiente removido do orçamento.');
     }
 
-    // --- Métodos do Relatório e PDF --- //
+    public function storePiece(Request $request, Orcamento $orcamento, OrcamentoLocal $local)
+    {
+        abort_unless($local->orcamento_id === $orcamento->id, 404);
 
-    /**
-     * Show the form for the budget report.
-     */
+        $dados = $request->validate([
+            'material_id' => 'required|exists:materials,id',
+            'identificador' => 'nullable|string|max:120',
+            'largura_mm' => 'required|numeric|min:1',
+            'comprimento_mm' => 'required|numeric|min:1',
+            'espessura_mm' => 'nullable|numeric|min:0',
+            'quantidade' => 'required|integer|min:1',
+            'custos_extras' => 'nullable|numeric|min:0',
+            'observacoes' => 'nullable|string',
+        ]);
+
+        $material = Material::findOrFail($dados['material_id']);
+        $precoMaterial = $material->currentPriceForDate($orcamento->data_base_precos ?? $orcamento->data);
+
+        if (! $precoMaterial) {
+            return back()
+                ->withInput()
+                ->withErrors(['material_id' => 'Não há preço vigente para este material na data-base do orçamento.']);
+        }
+
+        $larguraM = $dados['largura_mm'] / 1000;
+        $comprimentoM = $dados['comprimento_mm'] / 1000;
+        $area = round($larguraM * $comprimentoM, 3);
+        $perimetro = round(2 * ($larguraM + $comprimentoM), 3);
+        $quantidade = $dados['quantidade'];
+
+        $precoMaterialTotal = round($area * $precoMaterial->preco_m2 * $quantidade, 2);
+        $custosExtras = $dados['custos_extras'] ?? 0;
+
+        DB::transaction(function () use (
+            $local,
+            $dados,
+            $precoMaterial,
+            $area,
+            $perimetro,
+            $precoMaterialTotal,
+            $custosExtras
+        ) {
+            $local->pecas()->create([
+                'material_id' => $dados['material_id'],
+                'material_price_id' => $precoMaterial->id,
+                'identificador' => $dados['identificador'] ?? null,
+                'largura_mm' => $dados['largura_mm'],
+                'comprimento_mm' => $dados['comprimento_mm'],
+                'espessura_mm' => $dados['espessura_mm'] ?? null,
+                'quantidade' => $dados['quantidade'],
+                'area_m2' => $area,
+                'perimetro_ml' => $perimetro,
+                'preco_material_unitario' => $precoMaterial->preco_m2,
+                'preco_material_total' => $precoMaterialTotal,
+                'preco_servico_total' => 0,
+                'custos_extras' => $custosExtras,
+                'total' => $precoMaterialTotal + $custosExtras,
+                'observacoes' => $dados['observacoes'] ?? null,
+            ]);
+        });
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Peça adicionada ao ambiente.');
+    }
+
+    public function destroyPiece(Orcamento $orcamento, OrcamentoPeca $peca)
+    {
+        abort_unless($peca->local?->orcamento_id === $orcamento->id, 404);
+
+        $peca->delete();
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Peça removida do orçamento.');
+    }
+
+    public function storePieceService(Request $request, Orcamento $orcamento, OrcamentoPeca $peca)
+    {
+        abort_unless($peca->local?->orcamento_id === $orcamento->id, 404);
+
+        $dados = $request->validate([
+            'servico_id' => 'required|exists:servicos,id',
+            'quantidade' => 'required|numeric|min:0.01',
+            'preco_unitario' => 'nullable|numeric|min:0',
+            'descricao' => 'nullable|string|max:255',
+            'tipo_cobranca' => 'nullable|string|max:30',
+        ]);
+
+        $servico = Servico::findOrFail($dados['servico_id']);
+        $precoServico = $servico->currentPriceForDate($orcamento->data_base_precos ?? $orcamento->data);
+
+        if (! $precoServico && empty($dados['preco_unitario'])) {
+            return back()
+                ->withInput()
+                ->withErrors(['servico_id' => 'Não há preço vigente para este serviço e nenhum valor foi informado.']);
+        }
+
+        $precoUnitario = $dados['preco_unitario'] ?? $precoServico->preco;
+        $total = round($precoUnitario * $dados['quantidade'], 2);
+
+        DB::transaction(function () use ($peca, $servico, $precoServico, $dados, $precoUnitario, $total) {
+            $peca->servicos()->create([
+                'servico_id' => $servico->id,
+                'servico_price_id' => $precoServico?->id,
+                'descricao' => $dados['descricao'] ?? $servico->nome,
+                'tipo_cobranca' => $dados['tipo_cobranca'] ?? $servico->tipo_cobranca,
+                'quantidade' => $dados['quantidade'],
+                'preco_unitario' => $precoUnitario,
+                'total' => $total,
+            ]);
+        });
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Serviço vinculado à peça.');
+    }
+
+    public function destroyPieceService(Orcamento $orcamento, OrcamentoPecaServico $servico)
+    {
+        abort_unless($servico->peca?->local?->orcamento_id === $orcamento->id, 404);
+
+        $servico->delete();
+
+        $this->calculator->recalcular($orcamento->fresh('locais.pecas.servicos'));
+
+        return back()->with('success', 'Serviço removido da peça.');
+    }
+
     public function relatorioForm()
     {
-        return view("relatorios.orcamentos.form");
+        return view('relatorios.orcamentos.form', [
+            'statuses' => self::STATUSES,
+        ]);
     }
 
-    /**
-     * Search and display the budget report based on filters.
-     */
     public function buscarRelatorio(Request $request)
     {
-        $query = Orcamento::with("cliente"); // Eager load cliente
+        $dados = $request->validate([
+            'numero' => 'nullable|string|max:25',
+            'nome_cliente' => 'nullable|string|max:255',
+            'status' => 'nullable|in:' . implode(',', self::STATUSES),
+            'data_inicio' => 'nullable|date',
+            'data_fim' => 'nullable|date|after_or_equal:data_inicio',
+        ]);
 
-        // Filter by Budget Number (ID)
-        if ($request->filled("numero")) {
-            $query->where("id", $request->numero);
+        $query = Orcamento::with('cliente');
+
+        if (! empty($dados['numero'])) {
+            $query->where('numero', 'like', '%' . $dados['numero'] . '%');
         }
 
-        // Filter by Client Name
-        if ($request->filled("nome_cliente")) {
-            $query->whereHas("cliente", function ($q) use ($request) {
-                $q->where("nome", "like", "%" . $request->nome_cliente . "%");
+        if (! empty($dados['nome_cliente'])) {
+            $query->whereHas('cliente', function ($subQuery) use ($dados) {
+                $subQuery->where('nome', 'like', '%' . $dados['nome_cliente'] . '%');
             });
         }
 
-        // Filter by Date Range
-        if ($request->filled("data_inicio")) {
-            $query->whereDate("data", ">=", $request->data_inicio);
-        }
-        if ($request->filled("data_fim")) {
-            $query->whereDate("data", "<=", $request->data_fim);
+        if (! empty($dados['status'])) {
+            $query->where('status', $dados['status']);
         }
 
-        $orcamentos = $query->orderBy("data", "desc")->orderBy("id", "desc")->paginate(15); // Paginate results
+        if (! empty($dados['data_inicio'])) {
+            $query->whereDate('data', '>=', $dados['data_inicio']);
+        }
 
-        // Return the same view with results and input data
-        return view("relatorios.orcamentos.form", [
-            "orcamentos" => $orcamentos,
-            "input" => $request->all() // Pass input back to repopulate form
+        if (! empty($dados['data_fim'])) {
+            $query->whereDate('data', '<=', $dados['data_fim']);
+        }
+
+        $orcamentos = $query
+            ->orderByDesc('data')
+            ->orderByDesc('id')
+            ->paginate(20)
+            ->withQueryString();
+
+        return view('relatorios.orcamentos.form', [
+            'statuses' => self::STATUSES,
+            'orcamentos' => $orcamentos,
+            'input' => $dados,
         ]);
     }
 
-    /**
-     * Generate PDF for the specified budget.
-     */
     public function gerarPdf(Orcamento $orcamento)
     {
-        // Load necessary relationships
-        $orcamento->load("cliente", "items.material", "items.servico");
+        $orcamento->load([
+            'cliente',
+            'paymentMethod',
+            'locais.pecas.material',
+            'locais.pecas.servicos.servico',
+        ]);
 
-        // Render the Blade view for the PDF content
-        $html = view("orcamentos.pdf", compact("orcamento"))->render();
+        $html = view('orcamentos.pdf', compact('orcamento'))->render();
 
-        // Use WeasyPrint to generate the PDF
-        try {
-            // Create a temporary file for the HTML content
-            $htmlFilePath = tempnam(sys_get_temp_dir(), "orcamento_html_") . ".html";
-            file_put_contents($htmlFilePath, $html);
+        $htmlFilePath = tempnam(sys_get_temp_dir(), 'orcamento_html_') . '.html';
+        $pdfFilePath = tempnam(sys_get_temp_dir(), 'orcamento_pdf_') . '.pdf';
 
-            // Create a temporary file for the PDF output
-            $pdfFilePath = tempnam(sys_get_temp_dir(), "orcamento_pdf_") . ".pdf";
+        file_put_contents($htmlFilePath, $html);
 
-            // Build the WeasyPrint command
-            $command = sprintf(
-                "weasyprint %s %s",
-                escapeshellarg($htmlFilePath),
-                escapeshellarg($pdfFilePath)
-            );
+        $command = sprintf(
+            'weasyprint %s %s',
+            escapeshellarg($htmlFilePath),
+            escapeshellarg($pdfFilePath)
+        );
 
-            // Execute the command
-            $output = null;
-            $return_var = null;
-            exec($command, $output, $return_var);
+        $output = null;
+        $status = null;
+        exec($command, $output, $status);
 
-            // Clean up the temporary HTML file
-            unlink($htmlFilePath);
+        unlink($htmlFilePath);
 
-            // Check if PDF generation was successful
-            if ($return_var === 0 && file_exists($pdfFilePath)) {
-                // Return the PDF as a download
-                return response()->download($pdfFilePath, "orcamento_" . $orcamento->id . ".pdf")->deleteFileAfterSend(true);
-            } else {
-                // Log error details if available
-                // Log::error("WeasyPrint Error: " . implode("\n", $output));
-                if (file_exists($pdfFilePath)) {
-                    unlink($pdfFilePath);
-                }
-                return redirect()->back()->with("error", "Erro ao gerar o PDF do orçamento. Detalhes: " . implode(" ", $output));
-            }
-        } catch (\Exception $e) {
-            // Log::error("Erro geral ao gerar PDF: " . $e->getMessage());
-            if (isset($htmlFilePath) && file_exists($htmlFilePath)) unlink($htmlFilePath);
-            if (isset($pdfFilePath) && file_exists($pdfFilePath)) unlink($pdfFilePath);
-            return redirect()->back()->with("error", "Erro inesperado ao gerar o PDF do orçamento.");
+        if ($status === 0 && file_exists($pdfFilePath)) {
+            return response()
+                ->download($pdfFilePath, "orcamento_{$orcamento->numero}.pdf")
+                ->deleteFileAfterSend(true);
         }
+
+        if (file_exists($pdfFilePath)) {
+            unlink($pdfFilePath);
+        }
+
+        return back()->with('error', 'Erro ao gerar o PDF do orçamento.');
     }
 
-} // End of OrcamentoController class
+    private function ajustarValoresDeDesconto(array &$dados): void
+    {
+        $tipo = $dados['desconto_tipo'];
+
+        if ($tipo === 'percentual') {
+            $dados['desconto_valor'] = 0;
+        }
+
+        if ($tipo === 'valor') {
+            $dados['desconto_percentual'] = 0;
+        }
+
+        if ($tipo === 'nenhum') {
+            $dados['desconto_percentual'] = 0;
+            $dados['desconto_valor'] = 0;
+        }
+    }
+}
