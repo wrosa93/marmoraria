@@ -10,10 +10,24 @@ class ServicoController extends Controller
     /**
      * Display a listing of the resource.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $servicos = Servico::orderBy("descricao")->get();
-        return view("servicos.index", compact("servicos"));
+        $busca = $request->string('q')->trim();
+
+        $servicos = Servico::query()
+            ->with(['prices' => function ($query) {
+                $query->orderByDesc('data_inicio');
+            }])
+            ->when($busca, function ($query, $busca) {
+                $query->where('nome', 'like', "%{$busca}%")
+                    ->orWhere('codigo', 'like', "%{$busca}%")
+                    ->orWhere('tipo_cobranca', 'like', "%{$busca}%");
+            })
+            ->orderBy('nome')
+            ->paginate(15)
+            ->withQueryString();
+
+        return view('servicos.index', compact('servicos', 'busca'));
     }
 
     /**
@@ -29,14 +43,37 @@ class ServicoController extends Controller
      */
     public function store(Request $request)
     {
-        $request->validate([
-            "descricao" => "required|string|max:255|unique:servicos,descricao",
-            "preco_unitario" => "required|numeric|min:0",
+        $dados = $request->validate([
+            'codigo' => 'required|string|max:30|unique:servicos,codigo',
+            'nome' => 'required|string|max:120',
+            'tipo_cobranca' => 'required|string|in:area,perimetro,peca,personalizado',
+            'unidade_medida' => 'required|string|max:10',
+            'ativo' => 'nullable|boolean',
+            'descricao' => 'nullable|string',
+            'preco' => 'required|numeric|min:0',
+            'data_inicio_preco' => 'required|date',
+            'observacao_preco' => 'nullable|string|max:255',
         ]);
 
-        $servico = Servico::create($request->all());
+        $servico = Servico::create([
+            'codigo' => $dados['codigo'],
+            'nome' => $dados['nome'],
+            'tipo_cobranca' => $dados['tipo_cobranca'],
+            'unidade_medida' => $dados['unidade_medida'],
+            'ativo' => $dados['ativo'] ?? true,
+            'descricao' => $dados['descricao'] ?? null,
+        ]);
 
-        return redirect()->route("servicos.index")->with("success", "Serviço ".$servico->descricao." criado com sucesso.");
+        $servico->prices()->create([
+            'data_inicio' => $dados['data_inicio_preco'],
+            'preco' => $dados['preco'],
+            'observacao' => $dados['observacao_preco'] ?? null,
+            'moeda' => 'BRL',
+        ]);
+
+        return redirect()
+            ->route('servicos.show', $servico)
+            ->with('success', 'Serviço criado com sucesso com preço vigente.');
     }
 
     /**
@@ -44,7 +81,11 @@ class ServicoController extends Controller
      */
     public function show(Servico $servico)
     {
-        return view("servicos.show", compact("servico"));
+        $servico->load(['prices' => function ($query) {
+            $query->orderByDesc('data_inicio');
+        }]);
+
+        return view('servicos.show', compact('servico'));
     }
 
     /**
@@ -52,7 +93,11 @@ class ServicoController extends Controller
      */
     public function edit(Servico $servico)
     {
-        return view("servicos.edit", compact("servico"));
+        $servico->load(['prices' => function ($query) {
+            $query->orderByDesc('data_inicio');
+        }]);
+
+        return view('servicos.edit', compact('servico'));
     }
 
     /**
@@ -60,14 +105,49 @@ class ServicoController extends Controller
      */
     public function update(Request $request, Servico $servico)
     {
-        $request->validate([
-            "descricao" => "required|string|max:255|unique:servicos,descricao," . $servico->id,
-            "preco_unitario" => "required|numeric|min:0",
+        $dados = $request->validate([
+            'codigo' => 'required|string|max:30|unique:servicos,codigo,' . $servico->id,
+            'nome' => 'required|string|max:120',
+            'tipo_cobranca' => 'required|string|in:area,perimetro,peca,personalizado',
+            'unidade_medida' => 'required|string|max:10',
+            'ativo' => 'nullable|boolean',
+            'descricao' => 'nullable|string',
+            'preco' => 'nullable|numeric|min:0|required_with:data_inicio_preco',
+            'data_inicio_preco' => 'nullable|date|required_with:preco',
+            'observacao_preco' => 'nullable|string|max:255',
         ]);
 
-        $servico->update($request->all());
+        $servico->update([
+            'codigo' => $dados['codigo'],
+            'nome' => $dados['nome'],
+            'tipo_cobranca' => $dados['tipo_cobranca'],
+            'unidade_medida' => $dados['unidade_medida'],
+            'ativo' => $dados['ativo'] ?? false,
+            'descricao' => $dados['descricao'] ?? null,
+        ]);
 
-        return redirect()->route("servicos.index")->with("success", "Serviço ".$servico->descricao." atualizado com sucesso.");
+        if (! empty($dados['preco']) && ! empty($dados['data_inicio_preco'])) {
+            $existe = $servico->prices()
+                ->whereDate('data_inicio', $dados['data_inicio_preco'])
+                ->exists();
+
+            if ($existe) {
+                return back()
+                    ->withInput()
+                    ->withErrors(['data_inicio_preco' => 'Já existe um preço para esta data.']);
+            }
+
+            $servico->prices()->create([
+                'data_inicio' => $dados['data_inicio_preco'],
+                'preco' => $dados['preco'],
+                'observacao' => $dados['observacao_preco'] ?? null,
+                'moeda' => 'BRL',
+            ]);
+        }
+
+        return redirect()
+            ->route('servicos.show', $servico)
+            ->with('success', "Serviço {$servico->nome} atualizado com sucesso.");
     }
 
     /**
@@ -75,18 +155,24 @@ class ServicoController extends Controller
      */
     public function destroy(Servico $servico)
     {
-       try {
-            // Verifica se o serviço está sendo usado em algum item de orçamento
-            if ($servico->orcamentoItems()->exists()) {
-                return redirect()->route("servicos.index")->with("error", "Não é possível remover o serviço ".$servico->descricao." pois ele está sendo utilizado em orçamentos.");
+        try {
+            if ($servico->pecaServicos()->exists()) {
+                return redirect()
+                    ->route('servicos.index')
+                    ->with('error', "Não é possível remover o serviço {$servico->nome} pois ele está em uso em orçamentos.");
             }
 
-            $nomeServico = $servico->descricao;
+            $nomeServico = $servico->nome;
+            $servico->prices()->delete();
             $servico->delete();
-            return redirect()->route("servicos.index")->with("success", "Serviço ".$nomeServico." removido com sucesso.");
+
+            return redirect()
+                ->route('servicos.index')
+                ->with('success', "Serviço {$nomeServico} removido com sucesso.");
         } catch (\Exception $e) {
-            // Log::error("Erro ao remover serviço: " . $e->getMessage());
-            return redirect()->route("servicos.index")->with("error", "Erro ao remover o serviço. Tente novamente.");
+            return redirect()
+                ->route('servicos.index')
+                ->with('error', 'Erro ao remover o serviço. Tente novamente.');
         }
     }
 }

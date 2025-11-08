@@ -11,8 +11,24 @@ class Cliente extends Model
 
     protected $fillable = [
         'nome',
+        'tipo_cliente',
+        'documento',
         'email',
         'telefone',
+        'telefone_secundario',
+        'endereco',
+        'numero',
+        'complemento',
+        'bairro',
+        'cidade',
+        'estado',
+        'cep',
+        'observacoes',
+    ];
+
+    protected $casts = [
+        'created_at' => 'datetime',
+        'updated_at' => 'datetime',
     ];
 
     public function orcamentos()

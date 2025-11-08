@@ -10,15 +10,44 @@ class Material extends Model
     use HasFactory;
 
     protected $fillable = [
+        'codigo',
         'nome',
         'tipo',
-        'preco_m2',
-        'espessura_mm',
+        'acabamento',
+        'cor',
+        'espessura_padrao_mm',
+        'ativo',
+        'descricao',
     ];
 
-    public function orcamentoItems()
+    protected $casts = [
+        'espessura_padrao_mm' => 'decimal:2',
+        'ativo' => 'boolean',
+    ];
+
+    public function prices()
     {
-        return $this->hasMany(OrcamentoItem::class);
+        return $this->hasMany(MaterialPrice::class);
+    }
+
+    public function currentPriceForDate(?string $date = null)
+    {
+        $referenceDate = $date ? \Illuminate\Support\Carbon::parse($date) : now();
+
+        return $this->prices()
+            ->where('data_inicio', '<=', $referenceDate->toDateString())
+            ->where(function ($query) use ($referenceDate) {
+                $query->whereNull('data_fim')
+                    ->orWhere('data_fim', '>=', $referenceDate->toDateString());
+            })
+            ->where('ativo', true)
+            ->orderByDesc('data_inicio')
+            ->first();
+    }
+
+    public function pecas()
+    {
+        return $this->hasMany(OrcamentoPeca::class);
     }
 }
 
